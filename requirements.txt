@@ -4,3 +4,4 @@ plotly
 anthropic
 fuzzywuzzy
 python-Levenshtein
+openpyxl
