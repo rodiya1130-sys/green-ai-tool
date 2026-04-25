@@ -1,4 +1,4 @@
-# app.py - 完整版：首頁簡化 + 零件查詢 + 其他功能保留
+# app.py - 完整版：加入智慧欄位辨識，完美相容中英文 BOM 表
 
 import streamlit as st
 import pandas as pd
@@ -99,7 +99,7 @@ PARTS_DB = {
 
 def fuzzy_match_key(input_val, db_dict, threshold=80):
     """模糊匹配"""
-    if not input_val:
+    if not input_val or pd.isna(input_val):
         return None
     
     input_lower = str(input_val).lower().strip()
@@ -116,11 +116,16 @@ def fuzzy_match_key(input_val, db_dict, threshold=80):
 def calculate_part_carbon(part_data: dict) -> dict:
     """計算單個零件的碳排"""
     
-    weight_kg = part_data['weight_g'] / 1000
-    quantity = part_data.get('quantity', 1)
+    # 防呆設計，確保抓到的是數字
+    try:
+        weight_kg = float(part_data.get('weight_g', 0)) / 1000
+        quantity = float(part_data.get('quantity', 1))
+    except (ValueError, TypeError):
+        weight_kg = 0
+        quantity = 1
     
     # 材料碳排
-    material_key = fuzzy_match_key(part_data['material'], MATERIAL_DB)
+    material_key = fuzzy_match_key(part_data.get('material', ''), MATERIAL_DB)
     if material_key:
         material_carbon = weight_kg * MATERIAL_DB[material_key]['carbon_factor']
         material_source = MATERIAL_DB[material_key]['source']
@@ -129,7 +134,7 @@ def calculate_part_carbon(part_data: dict) -> dict:
         material_source = 'Default'
     
     # 製程碳排
-    process_key = fuzzy_match_key(part_data['process'], PROCESS_DB)
+    process_key = fuzzy_match_key(part_data.get('process', ''), PROCESS_DB)
     if process_key:
         process_data = PROCESS_DB[process_key]
         actual_weight = weight_kg * quantity / process_data['yield']
@@ -140,8 +145,12 @@ def calculate_part_carbon(part_data: dict) -> dict:
         process_source = 'Default'
     
     # 物流碳排
-    transport_key = fuzzy_match_key(part_data['transport_mode'], TRANSPORT_DB)
-    distance_km = part_data.get('distance_km', 1000)
+    transport_key = fuzzy_match_key(part_data.get('transport_mode', ''), TRANSPORT_DB)
+    try:
+        distance_km = float(part_data.get('distance_km', 1000))
+    except (ValueError, TypeError):
+        distance_km = 1000
+        
     if transport_key:
         transport_carbon = weight_kg * distance_km * TRANSPORT_DB[transport_key]['carbon_per_tkm']
         transport_source = TRANSPORT_DB[transport_key]['source']
@@ -174,7 +183,7 @@ def check_carbon_warning(total_carbon: float, threshold: float = 5.0) -> dict:
     if total_carbon > threshold:
         return {
             'status': 'warning',
-            'message': f'⚠️ 警告：碳排 {total_carbon:.2f} kgCO2e 超過閥值 {threshold} kgCO2e',
+            'message': f'⚠️ 警告：總碳足跡 {total_carbon:.2f} kgCO2e 超過閥值 {threshold} kgCO2e',
             'severity': 'high' if total_carbon > threshold * 1.5 else 'medium'
         }
     return {'status': 'ok', 'message': '✅ 碳排在合理範圍內'}
@@ -214,10 +223,10 @@ def get_ai_recommendation(part_name: str, carbon_data: dict, alternatives: list,
 【零件信息】
 - 名稱: {part_name}
 - 總碳排: {carbon_data['total_carbon']:.2f} kgCO2e
-  - 材料碳排: {carbon_data['material_carbon']:.2f} kgCO2e ({carbon_data['material_carbon']/carbon_data['total_carbon']*100:.1f}%)
-  - 製程碳排: {carbon_data['process_carbon']:.2f} kgCO2e ({carbon_data['process_carbon']/carbon_data['total_carbon']*100:.1f}%)
-  - 物流碳排: {carbon_data['transport_carbon']:.2f} kgCO2e ({carbon_data['transport_carbon']/carbon_data['total_carbon']*100:.1f}%)
-  - 包裝碳排: {carbon_data['packaging_carbon']:.2f} kgCO2e ({carbon_data['packaging_carbon']/carbon_data['total_carbon']*100:.1f}%)
+  - 材料碳排: {carbon_data['material_carbon']:.2f} kgCO2e ({carbon_data['material_carbon']/max(carbon_data['total_carbon'],0.001)*100:.1f}%)
+  - 製程碳排: {carbon_data['process_carbon']:.2f} kgCO2e ({carbon_data['process_carbon']/max(carbon_data['total_carbon'],0.001)*100:.1f}%)
+  - 物流碳排: {carbon_data['transport_carbon']:.2f} kgCO2e ({carbon_data['transport_carbon']/max(carbon_data['total_carbon'],0.001)*100:.1f}%)
+  - 包裝碳排: {carbon_data['packaging_carbon']:.2f} kgCO2e ({carbon_data['packaging_carbon']/max(carbon_data['total_carbon'],0.001)*100:.1f}%)
 
 【可替換材料】
 {json.dumps(alternatives, indent=2, ensure_ascii=False)}
@@ -240,6 +249,16 @@ def get_ai_recommendation(part_name: str, carbon_data: dict, alternatives: list,
     )
     
     return message.content[0].text
+
+def extract_value(row, keyword, default):
+    """智慧欄位抓取器：不管欄位是中英文混合，只要有關鍵字就能抓到資料"""
+    for col in row.index:
+        if keyword.lower() in str(col).lower():
+            val = row[col]
+            if pd.isna(val):
+                return default
+            return val
+    return default
 
 # ==========================================
 # 🎨 Streamlit 頁面
@@ -455,11 +474,7 @@ def show_bom_estimation(api_key: str):
     st.header("📊 BOM 快速估算")
     
     st.markdown("""
-    上傳物料清單 (CSV/Excel)，系統自動計算碳足跡。
-    
-    **必需欄位：**
-    - part_number, part_name, quantity, weight_g
-    - material, process, origin, transport_mode, distance_km
+    上傳物料清單 (CSV/Excel)，系統會**自動對接欄位名稱**並計算碳足跡。
     """)
     
     uploaded_file = st.file_uploader("上傳 BOM 檔案", type=['csv', 'xlsx'])
@@ -473,21 +488,23 @@ def show_bom_estimation(api_key: str):
             
             st.success("✅ 檔案上傳成功")
             
-            # 簡單的 BOM 估算
+            # 使用智慧提取提取資料估算
             result_rows = []
             for idx, row in bom_df.iterrows():
                 part_data = {
-                    'weight_g': row.get('weight_g', 0),
-                    'material': row.get('material', ''),
-                    'process': row.get('process', ''),
-                    'transport_mode': row.get('transport_mode', ''),
-                    'distance_km': row.get('distance_km', 1000),
-                    'quantity': row.get('quantity', 1),
+                    'weight_g': extract_value(row, 'weight_g', 0),
+                    'material': extract_value(row, 'material', ''),
+                    'process': extract_value(row, 'process', ''),
+                    'transport_mode': extract_value(row, 'transport_mode', ''),
+                    'distance_km': extract_value(row, 'distance_km', 1000),
+                    'quantity': extract_value(row, 'quantity', 1),
                 }
+                
                 carbon = calculate_part_carbon(part_data)
+                
                 result_rows.append({
-                    'part_number': row.get('part_number', ''),
-                    'part_name': row.get('part_name', ''),
+                    'part_number': extract_value(row, 'part_number', f'Unknown-{idx}'),
+                    'part_name': extract_value(row, 'part_name', f'Part-{idx}'),
                     **carbon
                 })
             
@@ -498,7 +515,8 @@ def show_bom_estimation(api_key: str):
             
             # 統計
             col1, col2, col3, col4 = st.columns(4)
-            col1.metric("總碳排", f"{result_df['total_carbon'].sum():.2f} kgCO2e")
+            total_carbon_sum = result_df['total_carbon'].sum()
+            col1.metric("總碳排", f"{total_carbon_sum:.2f} kgCO2e")
             col2.metric("零件數", len(result_df))
             col3.metric("平均單件碳排", f"{result_df['total_carbon'].mean():.2f} kgCO2e")
             col4.metric("最高碳排零件", f"{result_df['total_carbon'].max():.2f} kgCO2e")
@@ -535,21 +553,23 @@ def show_design_recommendations(api_key: str):
             else:
                 bom_df = pd.read_excel(uploaded_file)
             
-            # 估算碳足跡
+            # 使用智慧提取提取資料
             result_rows = []
             for idx, row in bom_df.iterrows():
                 part_data = {
-                    'weight_g': row.get('weight_g', 0),
-                    'material': row.get('material', ''),
-                    'process': row.get('process', ''),
-                    'transport_mode': row.get('transport_mode', ''),
-                    'distance_km': row.get('distance_km', 1000),
-                    'quantity': row.get('quantity', 1),
+                    'weight_g': extract_value(row, 'weight_g', 0),
+                    'material': extract_value(row, 'material', ''),
+                    'process': extract_value(row, 'process', ''),
+                    'transport_mode': extract_value(row, 'transport_mode', ''),
+                    'distance_km': extract_value(row, 'distance_km', 1000),
+                    'quantity': extract_value(row, 'quantity', 1),
                 }
+                
                 carbon = calculate_part_carbon(part_data)
+                
                 result_rows.append({
-                    'part_number': row.get('part_number', ''),
-                    'part_name': row.get('part_name', ''),
+                    'part_number': extract_value(row, 'part_number', f'Unknown-{idx}'),
+                    'part_name': extract_value(row, 'part_name', f'Part-{idx}'),
                     **carbon
                 })
             
