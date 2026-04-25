@@ -266,9 +266,7 @@ def extract_value(row, keyword, default):
 
 def show_home():
     st.markdown("""
-    # 🌱 OPS 碳足跡 AI 工具
-    
-    企業級碳足跡管理與綠色設計推薦平台
+    # 
     
     ## 核心功能
     
